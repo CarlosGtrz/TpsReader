@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <NoWarn>$(NoWarn);CA1720;CA1724</NoWarn>
     <PackageId>TpsReader</PackageId>
-    <Version>0.3.5</Version>
+    <Version>0.3.6</Version>
     <Authors>CarlosGtrz</Authors>
     <Description>A simple, read-only .NET reader for Clarion TopSpeed TPS files.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>

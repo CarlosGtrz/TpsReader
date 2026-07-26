@@ -12,7 +12,7 @@ namespace or shim package is provided.
 ## Library usage
 
 ```powershell
-dotnet add package TpsReader --version 0.3.5
+dotnet add package TpsReader --version 0.3.6
 ```
 
 ### Basic usage
@@ -133,12 +133,37 @@ Set `IgnoreErrors = true` only for intentional partial recovery. A malformed
 data page is discarded atomically; no partial record from that page is returned.
 `StringEncoding` controls schema names, string fields, GROUP text, and MEMO text.
 
+Use `OpenMetadata` with the same path, stream, or byte-array inputs when only
+table definitions are needed:
+
+```csharp
+var metadata = TpsFile.OpenMetadata(@"C:\data\CUSTOMER.TPS");
+Console.WriteLine(metadata.IsMetadataOnly);       // true
+Console.WriteLine(metadata.GetTable().RecordLength);
+```
+
+Metadata-only tables have empty `Records` collections and do not scan record or
+MEMO/BLOB content. `TpsFile.IsEncrypted` reports whether owner-based decryption
+was actually used, and `RecoveryIssueCount` reports malformed block/page
+incidents skipped during recovery.
+
+Set `TpsOpenOptions.Progress` to receive byte-based `TpsReadProgress` updates for
+source loading, decryption, definition scanning, and content scanning. Metadata-
+only opens omit the content stage.
+
+Schema objects preserve raw TPS details in addition to their existing logical
+properties. Tables expose `RecordLength`; fields expose raw type, flags, index,
+and string-mask metadata; MEMO/BLOB definitions expose declared length and
+external name; and indexes expose flags, external name, and ordered components.
+Each record exposes its `SourcePageOffset`. `GetMemoState` distinguishes absent,
+complete, and damaged MEMO/BLOB values recovered with `IgnoreErrors`.
+
 ## Command-line tool
 
 Install the tool package while keeping the short `tps` command:
 
 ```powershell
-dotnet tool install --global TpsReader.Tool --version 0.3.5
+dotnet tool install --global TpsReader.Tool --version 0.3.6
 tps --help
 ```
 

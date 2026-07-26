@@ -23,7 +23,8 @@ public sealed class TpsRecord
         IReadOnlyDictionary<string, TpsMemoValue> memosByName,
         IReadOnlySet<string>? ambiguousFieldAliases = null,
         IReadOnlySet<string>? ambiguousMemoAliases = null,
-        IReadOnlyDictionary<string, TpsFieldType>? fieldTypesByName = null)
+        IReadOnlyDictionary<string, TpsFieldType>? fieldTypesByName = null,
+        int sourcePageOffset = 0)
     {
         RecordNumber = recordNumber;
         _valuesByName = valuesByName;
@@ -31,10 +32,14 @@ public sealed class TpsRecord
         _ambiguousFieldAliases = ambiguousFieldAliases ?? EmptyAliases;
         _ambiguousMemoAliases = ambiguousMemoAliases ?? EmptyAliases;
         _fieldTypesByName = fieldTypesByName ?? EmptyFieldTypes;
+        SourcePageOffset = sourcePageOffset;
     }
 
     /// <summary>Gets the record number stored by TPS.</summary>
     public int RecordNumber { get; }
+
+    /// <summary>Gets the byte offset of the source page containing this record.</summary>
+    public int SourcePageOffset { get; }
 
     /// <summary>Gets a field, MEMO, or BLOB by full name or unambiguous short name.</summary>
     public object? this[string name] => GetValue(name);
@@ -184,6 +189,9 @@ public sealed class TpsRecord
 
         return memo.Blob?.ToArray();
     }
+
+    /// <summary>Gets the availability and integrity state of a MEMO or BLOB.</summary>
+    public TpsMemoState GetMemoState(string name) => GetMemoValue(name).State;
 
     /// <summary>Gets the lossless string representation of a DECIMAL value.</summary>
     public string GetDecimalString(string name, int elementIndex = 0)
@@ -531,4 +539,22 @@ public sealed class TpsRecord
     private sealed record ResolvedValue(object? Value, TpsFieldType? FieldType);
 }
 
-internal sealed record TpsMemoValue(TpsMemo Definition, string? Text, byte[]? Blob);
+internal sealed class TpsMemoValue
+{
+    public TpsMemoValue(
+        TpsMemo definition,
+        string? text,
+        byte[]? blob,
+        TpsMemoState? state = null)
+    {
+        Definition = definition;
+        Text = text;
+        Blob = blob;
+        State = state ?? (text is null && blob is null ? TpsMemoState.Empty : TpsMemoState.Complete);
+    }
+
+    public TpsMemo Definition { get; }
+    public string? Text { get; }
+    public byte[]? Blob { get; }
+    public TpsMemoState State { get; }
+}

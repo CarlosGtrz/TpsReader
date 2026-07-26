@@ -11,7 +11,8 @@ public sealed class TpsTable
         IReadOnlyList<TpsField> fields,
         IReadOnlyList<TpsMemo> memos,
         IReadOnlyList<TpsIndex> indexes,
-        IReadOnlyList<TpsRecord> records)
+        IReadOnlyList<TpsRecord> records,
+        int recordLength = 0)
     {
         TableNumber = tableNumber;
         Name = name;
@@ -19,6 +20,7 @@ public sealed class TpsTable
         Memos = memos;
         Indexes = indexes;
         Records = records;
+        RecordLength = recordLength;
         _recordsByNumber = records.ToDictionary(r => r.RecordNumber);
     }
 
@@ -39,6 +41,9 @@ public sealed class TpsTable
 
     /// <summary>Gets the materialized records in file order.</summary>
     public IReadOnlyList<TpsRecord> Records { get; }
+
+    /// <summary>Gets the record length declared by the table definition.</summary>
+    public int RecordLength { get; }
 
     /// <summary>Gets a record by its TPS record number.</summary>
     public TpsRecord GetRecord(int recordNumber)

@@ -55,7 +55,12 @@ internal sealed class TpsBlock
     private readonly TpsBinaryReader _reader;
     private readonly int _end;
 
-    public TpsBlock(TpsBinaryReader reader, int start, int end, bool ignoreErrors)
+    public TpsBlock(
+        TpsBinaryReader reader,
+        int start,
+        int end,
+        bool ignoreErrors,
+        Action? reportRecoveryIssue = null)
     {
         if (start < 0 || end < start || end > reader.Length)
         {
@@ -83,6 +88,7 @@ internal sealed class TpsBlock
                 }
                 catch (InvalidDataException) when (ignoreErrors)
                 {
+                    reportRecoveryIssue?.Invoke();
                     AdvanceOneSector();
                 }
 
@@ -153,7 +159,16 @@ internal sealed class TpsBlock
                 _reader.Seek(sectorPosition);
                 if (_reader.ReadInt32LittleEndian() == sectorPosition)
                 {
-                    return false;
+                    if (sectorPosition <= _end - 6 && sectorPosition <= _reader.Length - 6)
+                    {
+                        var nestedPageSize = _reader.ReadUInt16LittleEndian();
+                        if (nestedPageSize >= 13 &&
+                            nestedPageSize <= _end - sectorPosition &&
+                            nestedPageSize <= _reader.Length - sectorPosition)
+                        {
+                            return false;
+                        }
+                    }
                 }
             }
 
@@ -176,6 +191,7 @@ internal sealed class TpsPage
 
     public TpsPage(TpsBinaryReader reader)
     {
+        SourceOffset = reader.Position;
         _ = reader.ReadInt32LittleEndian();
         _pageSize = reader.ReadUInt16LittleEndian();
         if (_pageSize < 13)
@@ -190,6 +206,9 @@ internal sealed class TpsPage
         _flags = page.ReadByte();
         _storedData = page.ReadBytes(_pageSize - 13);
     }
+
+    public int SourceOffset { get; }
+    public int EndOffset => checked(SourceOffset + _pageSize);
 
     public IReadOnlyList<RawTpsRecord> ReadRecords(Encoding textEncoding)
     {
@@ -208,7 +227,7 @@ internal sealed class TpsPage
         while (data.Remaining > 1 && records.Count < _recordCount)
         {
             var current = previous is null
-                ? RawTpsRecord.ReadFirst(data, textEncoding)
+                ? RawTpsRecord.ReadFirst(data, textEncoding, SourceOffset)
                 : RawTpsRecord.ReadNext(previous, data, textEncoding);
             records.Add(current);
             previous = current;
@@ -225,20 +244,27 @@ internal sealed class TpsPage
 
 internal sealed class RawTpsRecord
 {
-    private RawTpsRecord(int recordLength, int headerLength, byte[] data, Encoding textEncoding)
+    private RawTpsRecord(
+        int recordLength,
+        int headerLength,
+        byte[] data,
+        Encoding textEncoding,
+        int sourcePageOffset)
     {
         RecordLength = recordLength;
         HeaderLength = headerLength;
+        SourcePageOffset = sourcePageOffset;
         Data = new TpsBinaryReader(data);
         BuildHeader(textEncoding);
     }
 
     public int RecordLength { get; }
     public int HeaderLength { get; }
+    public int SourcePageOffset { get; }
     public TpsBinaryReader Data { get; }
     public RecordHeader? Header { get; private set; }
 
-    public static RawTpsRecord ReadFirst(TpsBinaryReader reader, Encoding textEncoding)
+    public static RawTpsRecord ReadFirst(TpsBinaryReader reader, Encoding textEncoding, int sourcePageOffset = 0)
     {
         var flags = reader.ReadByte();
         if ((flags & 0xC0) != 0xC0)
@@ -248,7 +274,7 @@ internal sealed class RawTpsRecord
 
         var recordLength = reader.ReadUInt16LittleEndian();
         var headerLength = reader.ReadUInt16LittleEndian();
-        return Create(recordLength, headerLength, reader.ReadBytes(recordLength), textEncoding);
+        return Create(recordLength, headerLength, reader.ReadBytes(recordLength), textEncoding, sourcePageOffset);
     }
 
     public static RawTpsRecord ReadNext(RawTpsRecord previous, TpsBinaryReader reader, Encoding textEncoding)
@@ -266,17 +292,22 @@ internal sealed class RawTpsRecord
         previous.Data.CopyPrefixTo(data, prefixLength);
         var remainder = reader.ReadBytes(recordLength - prefixLength);
         Array.Copy(remainder, 0, data, prefixLength, remainder.Length);
-        return Create(recordLength, headerLength, data, textEncoding);
+        return Create(recordLength, headerLength, data, textEncoding, previous.SourcePageOffset);
     }
 
-    private static RawTpsRecord Create(int recordLength, int headerLength, byte[] data, Encoding textEncoding)
+    private static RawTpsRecord Create(
+        int recordLength,
+        int headerLength,
+        byte[] data,
+        Encoding textEncoding,
+        int sourcePageOffset)
     {
         if (headerLength < 0 || headerLength > recordLength)
         {
             throw new InvalidDataException($"Invalid TPS record header length {headerLength} for record length {recordLength}.");
         }
 
-        return new RawTpsRecord(recordLength, headerLength, data, textEncoding);
+        return new RawTpsRecord(recordLength, headerLength, data, textEncoding, sourcePageOffset);
     }
 
     private void BuildHeader(Encoding textEncoding)

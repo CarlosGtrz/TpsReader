@@ -3,7 +3,7 @@ using TpsReader.Internal;
 
 namespace TpsReader;
 
-/// <summary>Represents a read-only, fully parsed TPS file.</summary>
+/// <summary>Represents a read-only parsed TPS file.</summary>
 public sealed class TpsFile
 {
     private const string FormatName = "TPS";
@@ -16,14 +16,30 @@ public sealed class TpsFile
         ByteArray
     }
 
-    internal TpsFile(IReadOnlyList<TpsTable> tables)
+    internal TpsFile(
+        IReadOnlyList<TpsTable> tables,
+        bool isMetadataOnly = false,
+        bool isEncrypted = false,
+        int recoveryIssueCount = 0)
     {
         Tables = tables;
+        IsMetadataOnly = isMetadataOnly;
+        IsEncrypted = isEncrypted;
+        RecoveryIssueCount = recoveryIssueCount;
         _tablesByNumber = tables.ToDictionary(table => table.TableNumber);
     }
 
     /// <summary>Gets all tables discovered in the file.</summary>
     public IReadOnlyList<TpsTable> Tables { get; }
+
+    /// <summary>Gets whether this instance contains definitions without materialized records.</summary>
+    public bool IsMetadataOnly { get; }
+
+    /// <summary>Gets whether owner-based decryption was used to open the input.</summary>
+    public bool IsEncrypted { get; }
+
+    /// <summary>Gets the number of malformed block or page incidents skipped during recovery.</summary>
+    public int RecoveryIssueCount { get; }
 
     /// <summary>Gets the table when the file contains exactly one table.</summary>
     public TpsTable GetTable()
@@ -62,7 +78,8 @@ public sealed class TpsFile
         try
         {
             var data = TpsFileReader.ReadAllBytesShared(path);
-            return Parse(data, options, InputKind.File, path);
+            ReportLoading(options, data.Length);
+            return Parse(data, options, InputKind.File, path, metadataOnly: false);
         }
         catch (TpsParseException)
         {
@@ -88,7 +105,8 @@ public sealed class TpsFile
         try
         {
             var data = TpsFileReader.ReadAllBytes(stream);
-            return Parse(data, options, InputKind.Stream, sourcePath: null);
+            ReportLoading(options, data.Length);
+            return Parse(data, options, InputKind.Stream, sourcePath: null, metadataOnly: false);
         }
         catch (TpsParseException)
         {
@@ -109,7 +127,79 @@ public sealed class TpsFile
         try
         {
             var workingData = string.IsNullOrEmpty(options.Owner) ? data : data.ToArray();
-            return Parse(workingData, options, InputKind.ByteArray, sourcePath: null);
+            ReportLoading(options, workingData.Length);
+            return Parse(workingData, options, InputKind.ByteArray, sourcePath: null, metadataOnly: false);
+        }
+        catch (TpsParseException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw CreateOpenException(InputKind.ByteArray, ex);
+        }
+    }
+
+    /// <summary>Opens a TPS path and parses definitions without materializing records or MEMO/BLOB data.</summary>
+    public static TpsFile OpenMetadata(string path, TpsOpenOptions? options = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        options = ValidateOptions(options);
+
+        try
+        {
+            var data = TpsFileReader.ReadAllBytesShared(path);
+            ReportLoading(options, data.Length);
+            return Parse(data, options, InputKind.File, path, metadataOnly: true);
+        }
+        catch (TpsParseException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw CreateOpenException(InputKind.File, ex, path);
+        }
+    }
+
+    /// <summary>Opens TPS data from a stream and parses definitions without materializing content.</summary>
+    public static TpsFile OpenMetadata(Stream stream, TpsOpenOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (!stream.CanRead)
+        {
+            throw new ArgumentException("The stream must be readable.", nameof(stream));
+        }
+
+        options = ValidateOptions(options);
+
+        try
+        {
+            var data = TpsFileReader.ReadAllBytes(stream);
+            ReportLoading(options, data.Length);
+            return Parse(data, options, InputKind.Stream, sourcePath: null, metadataOnly: true);
+        }
+        catch (TpsParseException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw CreateOpenException(InputKind.Stream, ex);
+        }
+    }
+
+    /// <summary>Opens TPS bytes and parses definitions without materializing content.</summary>
+    public static TpsFile OpenMetadata(byte[] data, TpsOpenOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        options = ValidateOptions(options);
+
+        try
+        {
+            var workingData = string.IsNullOrEmpty(options.Owner) ? data : data.ToArray();
+            ReportLoading(options, workingData.Length);
+            return Parse(workingData, options, InputKind.ByteArray, sourcePath: null, metadataOnly: true);
         }
         catch (TpsParseException)
         {
@@ -199,10 +289,11 @@ public sealed class TpsFile
         byte[] data,
         TpsOpenOptions options,
         InputKind inputKind,
-        string? sourcePath)
+        string? sourcePath,
+        bool metadataOnly)
     {
         var reader = OpenReader(data, options);
-        var contents = reader.Parse(options.IgnoreErrors);
+        var contents = reader.Parse(options.IgnoreErrors, metadataOnly);
         if (contents.TableDefinitions.Count == 0)
         {
             throw new TpsParseException(new TpsParseError(
@@ -216,7 +307,11 @@ public sealed class TpsFile
         var tables = contents.TableDefinitions
             .Select(table => BuildTable(table.Key, table.Value, contents, options, sourceTableName))
             .ToArray();
-        return new TpsFile(tables);
+        return new TpsFile(
+            tables,
+            metadataOnly,
+            reader.IsEncrypted,
+            reader.RecoveryIssueCount);
     }
 
     private static TpsParseException CreateOpenException(
@@ -248,18 +343,23 @@ public sealed class TpsFile
     {
         if (string.IsNullOrEmpty(options.Owner))
         {
-            return new TpsFileReader(data, options.StringEncoding);
+            return new TpsFileReader(data, options.StringEncoding, options.Progress);
         }
 
         try
         {
-            var unencryptedFile = new TpsFileReader(data, options.StringEncoding);
+            var unencryptedFile = new TpsFileReader(data, options.StringEncoding, options.Progress);
             _ = unencryptedFile.GetHeader();
             return unencryptedFile;
         }
         catch (InvalidDataException)
         {
-            return new TpsFileReader(data, options.Owner, options.StringEncoding, options.IgnoreErrors);
+            return new TpsFileReader(
+                data,
+                options.Owner,
+                options.StringEncoding,
+                options.IgnoreErrors,
+                options.Progress);
         }
     }
 
@@ -288,15 +388,38 @@ public sealed class TpsFile
                 field.Length,
                 field.ElementCount,
                 field.DecimalDigits,
-                field.DecimalStorageLength))
+                field.DecimalStorageLength,
+                field.FieldType,
+                field.Flags,
+                field.IndexNumber,
+                field.StringLength,
+                field.StringMask))
             .ToArray();
 
         var memos = definition.Memos
-            .Select((memo, index) => new TpsMemo(index + 1, memo.Name, memo.ShortName, memo.Flags, memo.IsBlob))
+            .Select((memo, index) => new TpsMemo(
+                index + 1,
+                memo.Name,
+                memo.ShortName,
+                memo.Flags,
+                memo.IsBlob,
+                memo.Length,
+                memo.ExternalName))
             .ToArray();
 
         var indexes = definition.Indexes
-            .Select((index, ordinal) => new TpsIndex(ordinal + 1, index.Name, index.FieldCount))
+            .Select((index, ordinal) => new TpsIndex(
+                ordinal + 1,
+                index.Name,
+                index.FieldCount,
+                index.Flags,
+                index.ExternalName,
+                index.Components
+                    .Select(component => new TpsIndexComponent(
+                        component.Rank,
+                        component.FieldIndex,
+                        component.Flags))
+                    .ToArray()))
             .ToArray();
 
         var ambiguousFieldAliases = FindAmbiguousAliases(fields, field => field.Name, field => field.ShortName);
@@ -315,7 +438,14 @@ public sealed class TpsFile
             .ToArray();
 
         var name = ResolveTableName(tableNumber, definition, contents.TableNames, sourceTableName);
-        return new TpsTable(tableNumber, name, fields, memos, indexes, records);
+        return new TpsTable(
+            tableNumber,
+            name,
+            fields,
+            memos,
+            indexes,
+            records,
+            definition.RecordLength);
     }
 
     private static TpsRecord BuildRecord(
@@ -352,7 +482,8 @@ public sealed class TpsFile
             memoValues,
             ambiguousFieldAliases,
             ambiguousMemoAliases,
-            fieldTypes);
+            fieldTypes,
+            record.SourcePageOffset);
     }
 
     private static TpsMemoValue BuildMemoValue(
@@ -363,17 +494,22 @@ public sealed class TpsFile
     {
         if (source is null)
         {
-            return new TpsMemoValue(definition, null, null);
+            return new TpsMemoValue(definition, null, null, TpsMemoState.Empty);
         }
 
         if (definition.IsMemo)
         {
-            return new TpsMemoValue(definition, source.ReadText(options.StringEncoding), null);
+            return new TpsMemoValue(
+                definition,
+                source.ReadText(options.StringEncoding),
+                null,
+                source.FragmentState);
         }
 
         try
         {
-            return new TpsMemoValue(definition, null, source.ReadBlob(options.IgnoreErrors));
+            var blob = source.ReadBlob(options.IgnoreErrors, out var state);
+            return new TpsMemoValue(definition, null, blob, state);
         }
         catch (InvalidDataException ex)
         {
@@ -470,20 +606,28 @@ public sealed class TpsFile
 
     private static TpsFieldType MapFieldType(int type) => type switch
     {
-        1 => TpsFieldType.Byte,
-        2 => TpsFieldType.Short,
-        3 => TpsFieldType.UShort,
-        4 => TpsFieldType.Date,
-        5 => TpsFieldType.Time,
-        6 => TpsFieldType.Long,
-        7 => TpsFieldType.ULong,
-        8 => TpsFieldType.SReal,
-        9 => TpsFieldType.Real,
-        0x0A => TpsFieldType.Decimal,
-        0x12 => TpsFieldType.String,
-        0x13 => TpsFieldType.CString,
-        0x14 => TpsFieldType.PString,
-        0x16 => TpsFieldType.Group,
+        TpsFormatConstants.FieldByte => TpsFieldType.Byte,
+        TpsFormatConstants.FieldShort => TpsFieldType.Short,
+        TpsFormatConstants.FieldUShort => TpsFieldType.UShort,
+        TpsFormatConstants.FieldDate => TpsFieldType.Date,
+        TpsFormatConstants.FieldTime => TpsFieldType.Time,
+        TpsFormatConstants.FieldLong => TpsFieldType.Long,
+        TpsFormatConstants.FieldULong => TpsFieldType.ULong,
+        TpsFormatConstants.FieldSReal => TpsFieldType.SReal,
+        TpsFormatConstants.FieldReal => TpsFieldType.Real,
+        TpsFormatConstants.FieldDecimal => TpsFieldType.Decimal,
+        TpsFormatConstants.FieldString => TpsFieldType.String,
+        TpsFormatConstants.FieldCString => TpsFieldType.CString,
+        TpsFormatConstants.FieldPString => TpsFieldType.PString,
+        TpsFormatConstants.FieldGroup => TpsFieldType.Group,
         _ => TpsFieldType.Unknown
     };
+
+    private static void ReportLoading(TpsOpenOptions options, int length)
+    {
+        options.Progress?.Report(new TpsReadProgress(
+            TpsReadStage.LoadingSource,
+            length,
+            Math.Max(1, length)));
+    }
 }

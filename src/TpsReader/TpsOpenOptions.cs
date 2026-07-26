@@ -13,4 +13,7 @@ public sealed class TpsOpenOptions
 
     /// <summary>Gets the encoding used for schema names, strings, GROUP projections, and MEMOs.</summary>
     public Encoding StringEncoding { get; init; } = Encoding.Latin1;
+
+    /// <summary>Gets the optional receiver for byte-based open progress.</summary>
+    public IProgress<TpsReadProgress>? Progress { get; init; }
 }

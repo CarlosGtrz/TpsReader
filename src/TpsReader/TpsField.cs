@@ -13,7 +13,12 @@ public sealed class TpsField
         int length,
         int elementCount,
         int decimalDigits,
-        int decimalStorageLength)
+        int decimalStorageLength,
+        int rawTypeCode = 0,
+        int flags = 0,
+        int indexNumber = 0,
+        int stringLength = 0,
+        string? stringMask = null)
     {
         FieldNumber = fieldNumber;
         Name = name;
@@ -25,6 +30,11 @@ public sealed class TpsField
         ElementCount = elementCount;
         DecimalDigits = decimalDigits;
         DecimalStorageLength = decimalStorageLength;
+        RawTypeCode = rawTypeCode;
+        Flags = flags;
+        IndexNumber = indexNumber;
+        StringLength = stringLength;
+        StringMask = stringMask ?? string.Empty;
     }
 
     /// <summary>Gets the one-based field ordinal in the table schema.</summary>
@@ -56,6 +66,21 @@ public sealed class TpsField
 
     /// <summary>Gets the declared binary storage width for a DECIMAL field.</summary>
     public int DecimalStorageLength { get; }
+
+    /// <summary>Gets the raw TPS field type code.</summary>
+    public int RawTypeCode { get; }
+
+    /// <summary>Gets the raw TPS field flags.</summary>
+    public int Flags { get; }
+
+    /// <summary>Gets the raw TPS index number associated with the field.</summary>
+    public int IndexNumber { get; }
+
+    /// <summary>Gets the string length stored in TPS metadata.</summary>
+    public int StringLength { get; }
+
+    /// <summary>Gets the string mask stored in TPS metadata.</summary>
+    public string StringMask { get; }
 
     /// <summary>Gets whether the field contains multiple elements.</summary>
     public bool IsArray => ElementCount > 1;

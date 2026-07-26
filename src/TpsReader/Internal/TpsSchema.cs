@@ -11,8 +11,8 @@ internal sealed class FieldDefinitionRecord
         Name = reader.ReadNullTerminatedString(textEncoding);
         ElementCount = reader.ReadUInt16LittleEndian();
         Length = reader.ReadUInt16LittleEndian();
-        _ = reader.ReadUInt16LittleEndian();
-        _ = reader.ReadUInt16LittleEndian();
+        Flags = reader.ReadUInt16LittleEndian();
+        IndexNumber = reader.ReadUInt16LittleEndian();
 
         switch (FieldType)
         {
@@ -23,9 +23,9 @@ internal sealed class FieldDefinitionRecord
             case 0x12:
             case 0x13:
             case 0x14:
-                _ = reader.ReadUInt16LittleEndian();
-                var mask = reader.ReadNullTerminatedString(textEncoding);
-                if (mask.Length == 0)
+                StringLength = reader.ReadUInt16LittleEndian();
+                StringMask = reader.ReadNullTerminatedString(textEncoding);
+                if (StringMask.Length == 0)
                 {
                     _ = reader.ReadByte();
                 }
@@ -51,6 +51,10 @@ internal sealed class FieldDefinitionRecord
     public int Length { get; }
     public int DecimalDigits { get; }
     public int DecimalStorageLength { get; }
+    public int Flags { get; }
+    public int IndexNumber { get; }
+    public int StringLength { get; }
+    public string StringMask { get; } = string.Empty;
     public bool IsArray => ElementCount > 1;
 
     private static string StripPrefix(string name)
@@ -66,8 +70,8 @@ internal sealed class TableDefinitionRecord
 
     public TableDefinitionRecord(TpsBinaryReader reader, Encoding textEncoding)
     {
-        _ = reader.ReadUInt16LittleEndian();
-        _ = reader.ReadUInt16LittleEndian();
+        DriverVersion = reader.ReadUInt16LittleEndian();
+        RecordLength = reader.ReadUInt16LittleEndian();
         var fieldCount = reader.ReadUInt16LittleEndian();
         var memoCount = reader.ReadUInt16LittleEndian();
         var indexCount = reader.ReadUInt16LittleEndian();
@@ -99,6 +103,8 @@ internal sealed class TableDefinitionRecord
     public List<FieldDefinitionRecord> Fields { get; } = [];
     public List<MemoDefinitionRecord> Memos { get; } = [];
     public List<IndexDefinitionRecord> Indexes { get; } = [];
+    public int DriverVersion { get; }
+    public int RecordLength { get; }
 
     public object?[] ParseRecord(byte[] record)
     {
@@ -388,10 +394,12 @@ internal sealed class DataRecord
         var header = record.Header as DataHeader
             ?? throw new InvalidDataException("TPS data record has an invalid header.");
         RecordNumber = header.RecordNumber;
+        SourcePageOffset = record.SourcePageOffset;
         Values = tableDefinition.ParseRecord(record.Data.RemainingBytes());
     }
 
     public int RecordNumber { get; }
+    public int SourcePageOffset { get; }
     public object?[] Values { get; }
 }
 
@@ -399,38 +407,45 @@ internal sealed class IndexDefinitionRecord
 {
     public IndexDefinitionRecord(TpsBinaryReader reader, Encoding textEncoding)
     {
-        var externalFile = reader.ReadNullTerminatedString(textEncoding);
-        if (externalFile.Length == 0 && reader.ReadByte() != 1)
+        ExternalName = reader.ReadNullTerminatedString(textEncoding);
+        if (ExternalName.Length == 0 && reader.ReadByte() != 1)
         {
             throw new InvalidDataException("Invalid TPS index definition terminator.");
         }
 
         Name = reader.ReadNullTerminatedString(textEncoding);
-        _ = reader.ReadByte();
+        Flags = reader.ReadByte();
         FieldCount = reader.ReadUInt16LittleEndian();
         for (var i = 0; i < FieldCount; i++)
         {
-            _ = reader.ReadUInt16LittleEndian();
-            _ = reader.ReadUInt16LittleEndian();
+            Components.Add(new IndexComponentDefinitionRecord(
+                i + 1,
+                reader.ReadUInt16LittleEndian(),
+                reader.ReadUInt16LittleEndian()));
         }
     }
 
     public string Name { get; }
+    public string ExternalName { get; }
+    public int Flags { get; }
     public int FieldCount { get; }
+    public List<IndexComponentDefinitionRecord> Components { get; } = [];
 }
+
+internal sealed record IndexComponentDefinitionRecord(int Rank, int FieldIndex, int Flags);
 
 internal sealed class MemoDefinitionRecord
 {
     public MemoDefinitionRecord(TpsBinaryReader reader, Encoding textEncoding)
     {
-        var externalFile = reader.ReadNullTerminatedString(textEncoding);
-        if (externalFile.Length == 0 && reader.ReadByte() != 1)
+        ExternalName = reader.ReadNullTerminatedString(textEncoding);
+        if (ExternalName.Length == 0 && reader.ReadByte() != 1)
         {
             throw new InvalidDataException("Invalid TPS MEMO definition terminator.");
         }
 
         Name = reader.ReadNullTerminatedString(textEncoding);
-        _ = reader.ReadUInt16LittleEndian();
+        Length = reader.ReadUInt16LittleEndian();
         Flags = reader.ReadUInt16LittleEndian();
     }
 
@@ -445,28 +460,41 @@ internal sealed class MemoDefinitionRecord
     }
 
     public int Flags { get; }
-    public bool IsBlob => (Flags & 0x04) != 0;
+    public int Length { get; }
+    public string ExternalName { get; }
+    public bool IsBlob => (Flags & TpsFormatConstants.BlobFlag) != 0;
 }
 
 internal sealed class MemoRecord
 {
     private readonly byte[] _data;
 
-    public MemoRecord(MemoHeader header, TpsBinaryReader data)
+    public MemoRecord(MemoHeader header, TpsBinaryReader data, TpsMemoState fragmentState = TpsMemoState.Complete)
     {
         OwnerRecordNumber = header.OwnerRecordNumber;
         _data = data.ToArray();
+        FragmentState = fragmentState;
     }
 
     public int OwnerRecordNumber { get; }
+    public TpsMemoState FragmentState { get; }
 
     public string ReadText(Encoding textEncoding) => textEncoding.GetString(_data);
 
-    public byte[] ReadBlob(bool ignoreErrors)
+    public byte[] ReadBlob(bool ignoreErrors) => ReadBlob(ignoreErrors, out _);
+
+    public byte[] ReadBlob(bool ignoreErrors, out TpsMemoState state)
     {
+        state = FragmentState;
+        if (FragmentState == TpsMemoState.Damaged && !ignoreErrors)
+        {
+            throw new InvalidDataException("TPS BLOB fragments are incomplete.");
+        }
+
         var reader = new TpsBinaryReader(_data);
         if (reader.Remaining < 4)
         {
+            state = TpsMemoState.Damaged;
             if (ignoreErrors)
             {
                 return [];
@@ -478,6 +506,7 @@ internal sealed class MemoRecord
         var declaredLength = reader.ReadInt32LittleEndian();
         if (declaredLength < 0)
         {
+            state = TpsMemoState.Damaged;
             if (ignoreErrors)
             {
                 return reader.RemainingBytes();
@@ -488,6 +517,7 @@ internal sealed class MemoRecord
 
         if (declaredLength > reader.Remaining)
         {
+            state = TpsMemoState.Damaged;
             if (ignoreErrors)
             {
                 return reader.RemainingBytes();

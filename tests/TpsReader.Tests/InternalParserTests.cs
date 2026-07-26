@@ -36,6 +36,61 @@ public sealed class InternalParserTests
     }
 
     [Fact]
+    public void TableDefinition_preserves_raw_field_memo_and_index_metadata()
+    {
+        var bytes = new List<byte>();
+        AddUInt16(bytes, 7);
+        AddUInt16(bytes, 4);
+        AddUInt16(bytes, 1);
+        AddUInt16(bytes, 1);
+        AddUInt16(bytes, 1);
+
+        bytes.Add(TpsFormatConstants.FieldString);
+        AddUInt16(bytes, 0);
+        AddString(bytes, "T:VALUE");
+        AddUInt16(bytes, 1);
+        AddUInt16(bytes, 4);
+        AddUInt16(bytes, 3);
+        AddUInt16(bytes, 9);
+        AddUInt16(bytes, 4);
+        AddString(bytes, "@s4");
+
+        AddString(bytes, "memo.dat");
+        AddString(bytes, "T:NOTE");
+        AddUInt16(bytes, 16_384);
+        AddUInt16(bytes, TpsFormatConstants.MemoBinaryFlag);
+
+        AddString(bytes, "index.dat");
+        AddString(bytes, "T:BYVALUE");
+        bytes.Add(TpsFormatConstants.IndexPrimaryFlag);
+        AddUInt16(bytes, 1);
+        AddUInt16(bytes, 0);
+        AddUInt16(bytes, TpsFormatConstants.IndexComponentDescendingFlag);
+
+        var definition = new TableDefinitionRecord(
+            new TpsBinaryReader(bytes.ToArray()),
+            Encoding.Latin1);
+        var field = Assert.Single(definition.Fields);
+        var memo = Assert.Single(definition.Memos);
+        var index = Assert.Single(definition.Indexes);
+        var component = Assert.Single(index.Components);
+
+        Assert.Equal(7, definition.DriverVersion);
+        Assert.Equal(4, definition.RecordLength);
+        Assert.Equal(3, field.Flags);
+        Assert.Equal(9, field.IndexNumber);
+        Assert.Equal(4, field.StringLength);
+        Assert.Equal("@s4", field.StringMask);
+        Assert.Equal("memo.dat", memo.ExternalName);
+        Assert.Equal(16_384, memo.Length);
+        Assert.Equal(TpsFormatConstants.MemoBinaryFlag, memo.Flags);
+        Assert.Equal("index.dat", index.ExternalName);
+        Assert.Equal(TpsFormatConstants.IndexPrimaryFlag, index.Flags);
+        Assert.Equal(0, component.FieldIndex);
+        Assert.Equal(TpsFormatConstants.IndexComponentDescendingFlag, component.Flags);
+    }
+
+    [Fact]
     public void StringEncoding_applies_to_schema_names_and_values()
     {
         var windows1252 = CodePagesEncodingProvider.Instance.GetEncoding(1252)!;
@@ -138,10 +193,38 @@ public sealed class InternalParserTests
         ]));
 
         Assert.Throws<InvalidDataException>(() => truncated.ReadBlob(ignoreErrors: false));
-        Assert.Equal([1, 2, 3], truncated.ReadBlob(ignoreErrors: true));
+        Assert.Equal([1, 2, 3], truncated.ReadBlob(ignoreErrors: true, out var truncatedState));
+        Assert.Equal(TpsMemoState.Damaged, truncatedState);
 
         var missingHeader = new MemoRecord(CreateMemoHeader(), new TpsBinaryReader([1, 2, 3]));
-        Assert.Empty(missingHeader.ReadBlob(ignoreErrors: true));
+        Assert.Empty(missingHeader.ReadBlob(ignoreErrors: true, out var missingState));
+        Assert.Equal(TpsMemoState.Damaged, missingState);
+
+        var negativeLength = new MemoRecord(
+            CreateMemoHeader(),
+            new TpsBinaryReader([0xFF, 0xFF, 0xFF, 0xFF, 4, 5]));
+        Assert.Throws<InvalidDataException>(() => negativeLength.ReadBlob(ignoreErrors: false));
+        Assert.Equal([4, 5], negativeLength.ReadBlob(ignoreErrors: true, out var negativeState));
+        Assert.Equal(TpsMemoState.Damaged, negativeState);
+
+        var complete = new MemoRecord(
+            CreateMemoHeader(),
+            new TpsBinaryReader([2, 0, 0, 0, 6, 7]));
+        Assert.Equal([6, 7], complete.ReadBlob(ignoreErrors: false, out var completeState));
+        Assert.Equal(TpsMemoState.Complete, completeState);
+    }
+
+    [Fact]
+    public void Damaged_fragment_state_is_preserved_during_blob_recovery()
+    {
+        var damaged = new MemoRecord(
+            CreateMemoHeader(),
+            new TpsBinaryReader([2, 0, 0, 0, 1, 2]),
+            TpsMemoState.Damaged);
+
+        Assert.Throws<InvalidDataException>(() => damaged.ReadBlob(ignoreErrors: false));
+        Assert.Equal([1, 2], damaged.ReadBlob(ignoreErrors: true, out var state));
+        Assert.Equal(TpsMemoState.Damaged, state);
     }
 
     [Fact]
@@ -220,6 +303,16 @@ public sealed class InternalParserTests
     {
         bytes.Add((byte)value);
         bytes.Add((byte)(value >> 8));
+    }
+
+    private static void AddString(ICollection<byte> bytes, string value)
+    {
+        foreach (var character in Encoding.Latin1.GetBytes(value))
+        {
+            bytes.Add(character);
+        }
+
+        bytes.Add(0);
     }
 
     private sealed record FieldSpec(int Type, int Offset, string Name, int Length, int ElementCount = 1);
