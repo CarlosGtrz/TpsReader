@@ -28,7 +28,7 @@ Seconds between npm view attempts. Defaults to 5.
 ./scripts/publish-agent-skill.ps1 -WhatIf
 
 .EXAMPLE
-./scripts/publish-agent-skill.ps1 -TarballPath ./artifacts/skill-v1.0.1-release/dist/carlosgtrz-tpsreader-agent-skill-1.0.1.tgz
+./scripts/publish-agent-skill.ps1 -TarballPath ./artifacts/skill-v1.0.2-release/dist/carlosgtrz-tpsreader-agent-skill-1.0.2.tgz
 #>
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(

@@ -1,6 +1,6 @@
 {
   "name": "tpsreader",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Safely inspect, query, and explicitly export Clarion TopSpeed TPS files.",
   "author": {
     "name": "CarlosGtrz",

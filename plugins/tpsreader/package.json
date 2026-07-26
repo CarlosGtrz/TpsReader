@@ -1,6 +1,6 @@
 {
   "name": "@carlosgtrz/tpsreader-agent-skill",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Multi-agent skill for safely reading Clarion TopSpeed TPS files with TpsReader.",
   "license": "Apache-2.0",
   "author": "CarlosGtrz",

@@ -280,7 +280,7 @@ claude plugin install tpsreader@tpsreader
 ```
 
 ```text
-pi install npm:@carlosgtrz/tpsreader-agent-skill@1.0.1
+pi install npm:@carlosgtrz/tpsreader-agent-skill@1.0.2
 ```
 
 See the [agent-skill package documentation](plugins/tpsreader/README.md) for
