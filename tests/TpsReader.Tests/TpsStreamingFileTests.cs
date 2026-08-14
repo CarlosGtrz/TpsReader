@@ -129,7 +129,7 @@ public sealed class TpsStreamingFileTests
     }
 
     [Fact]
-    public void Large_logical_source_is_never_read_as_one_buffer()
+    public void Large_logical_source_uses_only_the_bounded_read_ahead_window()
     {
         var source = new TrackingLargeSource(
             File.ReadAllBytes(Fixture("CUSTOMER.TPS")),
@@ -141,8 +141,49 @@ public sealed class TpsStreamingFileTests
             sourcePath: null);
 
         Assert.Equal(7, streamed.ReadRecords(streamed.GetTable()).Count());
-        Assert.InRange(source.MaximumReadLength, 1, ushort.MaxValue);
-        Assert.True(source.TotalBytesRead < 1024 * 1024);
+        Assert.InRange(
+            source.MaximumReadLength,
+            1,
+            TpsOpenOptions.DefaultReadAheadBufferBytes);
+        Assert.True(source.TotalBytesRead <= TpsOpenOptions.DefaultReadAheadBufferBytes);
+    }
+
+    [Fact]
+    public void Read_ahead_substantially_reduces_underlying_source_reads()
+    {
+        var contents = File.ReadAllBytes(Fixture("CUSTOMER.TPS"));
+        var unbufferedSource = new TrackingLargeSource(contents, 220 * 1024 * 1024);
+        using (var unbuffered = TpsStreamingFile.Create(
+                   unbufferedSource,
+                   new TpsOpenOptions { ReadAheadBufferBytes = 0 },
+                   "stream",
+                   sourcePath: null))
+        {
+            Assert.Equal(7, unbuffered.ReadRecords(unbuffered.GetTable()).Count());
+        }
+
+        var bufferedSource = new TrackingLargeSource(contents, 220 * 1024 * 1024);
+        using (var buffered = TpsStreamingFile.Create(
+                   bufferedSource,
+                   new TpsOpenOptions(),
+                   "stream",
+                   sourcePath: null))
+        {
+            Assert.Equal(7, buffered.ReadRecords(buffered.GetTable()).Count());
+        }
+
+        Assert.True(unbufferedSource.ReadCalls > bufferedSource.ReadCalls * 5);
+        Assert.Equal(1, bufferedSource.ReadCalls);
+    }
+
+    [Fact]
+    public void Negative_read_ahead_budget_is_rejected()
+    {
+        var bytes = File.ReadAllBytes(Fixture("CUSTOMER.TPS"));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => TpsFile.OpenStreaming(
+            bytes,
+            new TpsOpenOptions { ReadAheadBufferBytes = -1 }));
     }
 
     [Fact]
@@ -229,10 +270,12 @@ public sealed class TpsStreamingFileTests
     {
         public int MaximumReadLength { get; private set; }
         public long TotalBytesRead { get; private set; }
+        public int ReadCalls { get; private set; }
         public int Length => length;
 
         public void ReadExactly(int offset, Span<byte> destination)
         {
+            ReadCalls++;
             MaximumReadLength = Math.Max(MaximumReadLength, destination.Length);
             TotalBytesRead += destination.Length;
             destination.Clear();

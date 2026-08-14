@@ -7,6 +7,10 @@ internal interface ITpsRandomAccessSource : IDisposable
     void ReadExactly(int offset, Span<byte> destination);
 }
 
+internal interface IMemoryBackedTpsSource
+{
+}
+
 internal static class TpsRandomAccessSource
 {
     public static ITpsRandomAccessSource OpenPath(string path) => new FileSource(path);
@@ -32,6 +36,64 @@ internal static class TpsRandomAccessSource
     {
         ArgumentNullException.ThrowIfNull(data);
         return new ByteArraySource(data);
+    }
+
+    public static ITpsRandomAccessSource WithReadAhead(
+        ITpsRandomAccessSource source,
+        int bufferSize)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return bufferSize == 0 || source is IMemoryBackedTpsSource
+            ? source
+            : new BufferedSource(source, bufferSize);
+    }
+
+    private sealed class BufferedSource(ITpsRandomAccessSource source, int bufferSize) : ITpsRandomAccessSource
+    {
+        private readonly byte[] _buffer = new byte[Math.Min(bufferSize, source.Length)];
+        private int _bufferStart = -1;
+        private int _bufferLength;
+
+        public int Length => source.Length;
+
+        public void ReadExactly(int offset, Span<byte> destination)
+        {
+            ValidateRange(offset, destination.Length, Length);
+            if (_buffer.Length == 0 || destination.Length > _buffer.Length)
+            {
+                source.ReadExactly(offset, destination);
+                return;
+            }
+
+            var copied = 0;
+            while (copied < destination.Length)
+            {
+                var currentOffset = offset + copied;
+                if (currentOffset < _bufferStart || currentOffset >= _bufferStart + _bufferLength)
+                {
+                    Fill(currentOffset);
+                }
+
+                var available = Math.Min(
+                    destination.Length - copied,
+                    _bufferStart + _bufferLength - currentOffset);
+                _buffer.AsSpan(currentOffset - _bufferStart, available)
+                    .CopyTo(destination[copied..]);
+                copied += available;
+            }
+        }
+
+        public void Dispose()
+        {
+            // The owner disposes the wrapped source; this window only owns managed memory.
+        }
+
+        private void Fill(int requestedOffset)
+        {
+            _bufferStart = requestedOffset / _buffer.Length * _buffer.Length;
+            _bufferLength = Math.Min(_buffer.Length, Length - _bufferStart);
+            source.ReadExactly(_bufferStart, _buffer.AsSpan(0, _bufferLength));
+        }
     }
 
     private sealed class FileSource : ITpsRandomAccessSource
@@ -111,7 +173,7 @@ internal static class TpsRandomAccessSource
         }
     }
 
-    private sealed class ByteArraySource(byte[] data) : ITpsRandomAccessSource
+    private sealed class ByteArraySource(byte[] data) : ITpsRandomAccessSource, IMemoryBackedTpsSource
     {
         public int Length => data.Length;
 

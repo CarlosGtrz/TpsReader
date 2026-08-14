@@ -520,6 +520,14 @@ public sealed class TpsFile
     {
         options ??= new TpsOpenOptions();
         ArgumentNullException.ThrowIfNull(options.StringEncoding);
+        if (options.ReadAheadBufferBytes < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options.ReadAheadBufferBytes),
+                options.ReadAheadBufferBytes,
+                "The read-ahead buffer size cannot be negative.");
+        }
+
         return options;
     }
 

@@ -53,7 +53,12 @@ public sealed class TpsStreamingFile : IDisposable
         string inputDescription,
         string? sourcePath)
     {
-        var reader = new TpsFileReader(source, options.Owner, options.StringEncoding, options.Progress);
+        var reader = new TpsFileReader(
+            source,
+            options.Owner,
+            options.StringEncoding,
+            options.Progress,
+            options.ReadAheadBufferBytes);
         var metadata = reader.ReadMetadata(options.IgnoreErrors);
         if (metadata.Definitions.Count == 0)
         {

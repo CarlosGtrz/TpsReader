@@ -188,6 +188,24 @@ cancellation. Streaming progress uses `IndexingMemos`, `StreamingRecords`, and
 `CountingRecords` stages. Errors found after enumeration begins are reported as
 `TpsParseException`.
 
+Path and seekable-stream readers use a bounded read-ahead window to reduce small
+random reads. The measured default adds at most 64 KiB per active reader. Tune
+or disable the budget when container limits or storage latency differ:
+
+```csharp
+using var file = TpsFile.OpenStreaming(
+    path,
+    new TpsOpenOptions
+    {
+        ReadAheadBufferBytes = 256 * 1024
+    });
+```
+
+Set `ReadAheadBufferBytes` to `0` to disable the window. Complete byte-array
+inputs do not allocate a redundant read-ahead window because their source is
+already in memory. The window does not retain table records between
+enumerations.
+
 Schema objects preserve raw TPS details in addition to their existing logical
 properties. Tables expose `RecordLength`; fields expose raw type, flags, index,
 and string-mask metadata; MEMO/BLOB definitions expose declared length and

@@ -13,11 +13,14 @@ internal sealed class TpsFileReader
         ITpsRandomAccessSource source,
         string? owner,
         Encoding textEncoding,
-        IProgress<TpsReadProgress>? progress = null)
+        IProgress<TpsReadProgress>? progress = null,
+        int readAheadBufferBytes = 0)
     {
         _textEncoding = textEncoding;
         _progress = progress;
-        _reader = new TpsRandomAccessReader(source, owner);
+        _reader = new TpsRandomAccessReader(
+            TpsRandomAccessSource.WithReadAhead(source, readAheadBufferBytes),
+            owner);
         if (_reader.IsEncrypted)
         {
             ReportProgress(
@@ -228,10 +231,11 @@ internal sealed class TpsFileReader
                 $"TPS MEMO/BLOB fragments are incomplete for memo {memoIndex}, record {ownerRecordNumber}.");
         }
 
-        var pageCache = new Dictionary<int, IReadOnlyList<RawTpsRecord>>();
         var fragments = new List<byte[]>();
         MemoHeader? firstHeader = null;
         var totalLength = 0;
+        var currentPageOffset = -1;
+        IReadOnlyList<RawTpsRecord>? currentPageRecords = null;
         foreach (var location in locations)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -240,22 +244,22 @@ internal sealed class TpsFileReader
                 continue;
             }
 
-            if (!pageCache.TryGetValue(location.PageOffset, out var records))
+            if (currentPageOffset != location.PageOffset)
             {
-                var page = ReadPageAt(location.PageOffset, location.PageSize);
-                records = page.ReadRecords(_textEncoding);
-                pageCache[location.PageOffset] = records;
+                currentPageOffset = location.PageOffset;
+                currentPageRecords = ReadPageAt(location.PageOffset, location.PageSize)
+                    .ReadRecords(_textEncoding);
             }
 
-            if ((uint)location.RecordOrdinal >= (uint)records.Count ||
-                records[location.RecordOrdinal].Header is not MemoHeader header)
+            if ((uint)location.RecordOrdinal >= (uint)currentPageRecords!.Count ||
+                currentPageRecords[location.RecordOrdinal].Header is not MemoHeader header)
             {
                 throw new InvalidDataException(
                     $"TPS MEMO/BLOB fragment at page {location.PageOffset} could not be located.");
             }
 
             firstHeader ??= header;
-            var bytes = records[location.RecordOrdinal].Data.RemainingBytes();
+            var bytes = currentPageRecords[location.RecordOrdinal].Data.RemainingBytes();
             totalLength = checked(totalLength + bytes.Length);
             fragments.Add(bytes);
         }
