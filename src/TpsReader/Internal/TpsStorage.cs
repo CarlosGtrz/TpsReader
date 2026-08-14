@@ -189,9 +189,9 @@ internal sealed class TpsPage
     private readonly byte _flags;
     private readonly byte[] _storedData;
 
-    public TpsPage(TpsBinaryReader reader)
+    public TpsPage(TpsBinaryReader reader, int? sourceOffset = null)
     {
-        SourceOffset = reader.Position;
+        SourceOffset = sourceOffset ?? reader.Position;
         _ = reader.ReadInt32LittleEndian();
         _pageSize = reader.ReadUInt16LittleEndian();
         if (_pageSize < 13)
@@ -208,6 +208,7 @@ internal sealed class TpsPage
     }
 
     public int SourceOffset { get; }
+    public int PageSize => _pageSize;
     public int EndOffset => checked(SourceOffset + _pageSize);
 
     public IReadOnlyList<RawTpsRecord> ReadRecords(Encoding textEncoding)

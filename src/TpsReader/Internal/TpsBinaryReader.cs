@@ -298,7 +298,8 @@ internal static class TpsRunLengthEncoding
             throw new InvalidDataException($"Invalid expected RLE output length {expectedLength}.");
         }
 
-        using var output = new MemoryStream();
+        var output = new byte[expectedLength];
+        var outputPosition = 0;
         if (compressed.Remaining == 0)
         {
             if (expectedLength == 0)
@@ -312,9 +313,10 @@ internal static class TpsRunLengthEncoding
         do
         {
             var literalCount = ReadCount(compressed, "literal");
-            EnsureOutputCapacity(output.Length, literalCount, expectedLength);
+            EnsureOutputCapacity(outputPosition, literalCount, expectedLength);
             var literals = compressed.ReadBytes(literalCount);
-            output.Write(literals);
+            literals.CopyTo(output, outputPosition);
+            outputPosition += literalCount;
 
             if (compressed.Remaining == 0)
             {
@@ -324,20 +326,18 @@ internal static class TpsRunLengthEncoding
             compressed.Advance(-1);
             var repeatedByte = compressed.ReadByte();
             var repeatCount = ReadExtendedCount(compressed.ReadByte(), compressed);
-            EnsureOutputCapacity(output.Length, repeatCount, expectedLength);
-            for (var i = 0; i < repeatCount; i++)
-            {
-                output.WriteByte(repeatedByte);
-            }
+            EnsureOutputCapacity(outputPosition, repeatCount, expectedLength);
+            output.AsSpan(outputPosition, repeatCount).Fill(repeatedByte);
+            outputPosition += repeatCount;
         }
         while (compressed.Remaining > 1);
 
-        if (output.Length != expectedLength)
+        if (outputPosition != expectedLength)
         {
-            throw new InvalidDataException($"RLE output contains {output.Length} bytes; expected {expectedLength}.");
+            throw new InvalidDataException($"RLE output contains {outputPosition} bytes; expected {expectedLength}.");
         }
 
-        return new TpsBinaryReader(output.ToArray());
+        return new TpsBinaryReader(output);
     }
 
     private static void EnsureOutputCapacity(long currentLength, int additionalLength, int expectedLength)

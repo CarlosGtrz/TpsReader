@@ -1,9 +1,9 @@
 namespace TpsReader;
 
-/// <summary>Represents a table and its materialized schema and records.</summary>
+/// <summary>Represents a table schema and any records materialized for it.</summary>
 public sealed class TpsTable
 {
-    private readonly Dictionary<int, TpsRecord> _recordsByNumber;
+    private Dictionary<int, TpsRecord>? _recordsByNumber;
 
     internal TpsTable(
         int tableNumber,
@@ -21,7 +21,6 @@ public sealed class TpsTable
         Indexes = indexes;
         Records = records;
         RecordLength = recordLength;
-        _recordsByNumber = records.ToDictionary(r => r.RecordNumber);
     }
 
     /// <summary>Gets the table number stored by the TPS file.</summary>
@@ -39,7 +38,7 @@ public sealed class TpsTable
     /// <summary>Gets the declared indexes.</summary>
     public IReadOnlyList<TpsIndex> Indexes { get; }
 
-    /// <summary>Gets the materialized records in file order.</summary>
+    /// <summary>Gets materialized records in file order; streaming and metadata-only tables are empty.</summary>
     public IReadOnlyList<TpsRecord> Records { get; }
 
     /// <summary>Gets the record length declared by the table definition.</summary>
@@ -48,7 +47,14 @@ public sealed class TpsTable
     /// <summary>Gets a record by its TPS record number.</summary>
     public TpsRecord GetRecord(int recordNumber)
     {
-        if (_recordsByNumber.TryGetValue(recordNumber, out var record))
+        var recordsByNumber = Volatile.Read(ref _recordsByNumber);
+        if (recordsByNumber is null)
+        {
+            var created = Records.ToDictionary(record => record.RecordNumber);
+            recordsByNumber = Interlocked.CompareExchange(ref _recordsByNumber, created, null) ?? created;
+        }
+
+        if (recordsByNumber.TryGetValue(recordNumber, out var record))
         {
             return record;
         }

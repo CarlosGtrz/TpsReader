@@ -77,9 +77,9 @@ public sealed class TpsFile
 
         try
         {
-            var data = TpsFileReader.ReadAllBytesShared(path);
-            ReportLoading(options, data.Length);
-            return Parse(data, options, InputKind.File, path, metadataOnly: false);
+            using var source = TpsRandomAccessSource.OpenPath(path);
+            ReportLoading(options, source.Length);
+            return Parse(source, options, InputKind.File, path, metadataOnly: false);
         }
         catch (TpsParseException)
         {
@@ -104,9 +104,17 @@ public sealed class TpsFile
 
         try
         {
-            var data = TpsFileReader.ReadAllBytes(stream);
-            ReportLoading(options, data.Length);
-            return Parse(data, options, InputKind.Stream, sourcePath: null, metadataOnly: false);
+            if (!stream.CanSeek)
+            {
+                var data = TpsFileReader.ReadAllBytes(stream);
+                ReportLoading(options, data.Length);
+                using var bufferedSource = TpsRandomAccessSource.OpenBytes(data);
+                return Parse(bufferedSource, options, InputKind.Stream, sourcePath: null, metadataOnly: false);
+            }
+
+            using var source = TpsRandomAccessSource.OpenStream(stream);
+            ReportLoading(options, source.Length);
+            return Parse(source, options, InputKind.Stream, sourcePath: null, metadataOnly: false);
         }
         catch (TpsParseException)
         {
@@ -115,6 +123,13 @@ public sealed class TpsFile
         catch (Exception ex)
         {
             throw CreateOpenException(InputKind.Stream, ex);
+        }
+        finally
+        {
+            if (stream.CanSeek)
+            {
+                stream.Position = stream.Length;
+            }
         }
     }
 
@@ -126,9 +141,9 @@ public sealed class TpsFile
 
         try
         {
-            var workingData = string.IsNullOrEmpty(options.Owner) ? data : data.ToArray();
-            ReportLoading(options, workingData.Length);
-            return Parse(workingData, options, InputKind.ByteArray, sourcePath: null, metadataOnly: false);
+            using var source = TpsRandomAccessSource.OpenBytes(data);
+            ReportLoading(options, source.Length);
+            return Parse(source, options, InputKind.ByteArray, sourcePath: null, metadataOnly: false);
         }
         catch (TpsParseException)
         {
@@ -148,9 +163,9 @@ public sealed class TpsFile
 
         try
         {
-            var data = TpsFileReader.ReadAllBytesShared(path);
-            ReportLoading(options, data.Length);
-            return Parse(data, options, InputKind.File, path, metadataOnly: true);
+            using var source = TpsRandomAccessSource.OpenPath(path);
+            ReportLoading(options, source.Length);
+            return Parse(source, options, InputKind.File, path, metadataOnly: true);
         }
         catch (TpsParseException)
         {
@@ -175,9 +190,17 @@ public sealed class TpsFile
 
         try
         {
-            var data = TpsFileReader.ReadAllBytes(stream);
-            ReportLoading(options, data.Length);
-            return Parse(data, options, InputKind.Stream, sourcePath: null, metadataOnly: true);
+            if (!stream.CanSeek)
+            {
+                var data = TpsFileReader.ReadAllBytes(stream);
+                ReportLoading(options, data.Length);
+                using var bufferedSource = TpsRandomAccessSource.OpenBytes(data);
+                return Parse(bufferedSource, options, InputKind.Stream, sourcePath: null, metadataOnly: true);
+            }
+
+            using var source = TpsRandomAccessSource.OpenStream(stream);
+            ReportLoading(options, source.Length);
+            return Parse(source, options, InputKind.Stream, sourcePath: null, metadataOnly: true);
         }
         catch (TpsParseException)
         {
@@ -186,6 +209,13 @@ public sealed class TpsFile
         catch (Exception ex)
         {
             throw CreateOpenException(InputKind.Stream, ex);
+        }
+        finally
+        {
+            if (stream.CanSeek)
+            {
+                stream.Position = stream.Length;
+            }
         }
     }
 
@@ -197,9 +227,9 @@ public sealed class TpsFile
 
         try
         {
-            var workingData = string.IsNullOrEmpty(options.Owner) ? data : data.ToArray();
-            ReportLoading(options, workingData.Length);
-            return Parse(workingData, options, InputKind.ByteArray, sourcePath: null, metadataOnly: true);
+            using var source = TpsRandomAccessSource.OpenBytes(data);
+            ReportLoading(options, source.Length);
+            return Parse(source, options, InputKind.ByteArray, sourcePath: null, metadataOnly: true);
         }
         catch (TpsParseException)
         {
@@ -210,6 +240,126 @@ public sealed class TpsFile
             throw CreateOpenException(InputKind.ByteArray, ex);
         }
     }
+
+    /// <summary>Opens a TPS path for bounded-memory, synchronous record enumeration.</summary>
+    public static TpsStreamingFile OpenStreaming(string path, TpsOpenOptions? options = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        options = ValidateOptions(options);
+        ITpsRandomAccessSource? source = null;
+        try
+        {
+            source = TpsRandomAccessSource.OpenPath(path);
+            var result = TpsStreamingFile.Create(source, options, "file", path);
+            source = null;
+            return result;
+        }
+        catch (TpsParseException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw CreateOpenException(InputKind.File, ex, path);
+        }
+        finally
+        {
+            source?.Dispose();
+        }
+    }
+
+    /// <summary>Opens a seekable TPS stream for bounded-memory, synchronous record enumeration.</summary>
+    public static TpsStreamingFile OpenStreaming(Stream stream, TpsOpenOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (!stream.CanRead)
+        {
+            throw new ArgumentException("The stream must be readable.", nameof(stream));
+        }
+
+        if (!stream.CanSeek)
+        {
+            throw new NotSupportedException(
+                "Streaming TPS reads require a seekable stream. Extract or spool the TPS input to a file first.");
+        }
+
+        options = ValidateOptions(options);
+        ITpsRandomAccessSource? source = null;
+        try
+        {
+            source = TpsRandomAccessSource.OpenStream(stream);
+            var result = TpsStreamingFile.Create(source, options, "stream", sourcePath: null);
+            source = null;
+            return result;
+        }
+        catch (TpsParseException)
+        {
+            throw;
+        }
+        catch (NotSupportedException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw CreateOpenException(InputKind.Stream, ex);
+        }
+        finally
+        {
+            source?.Dispose();
+        }
+    }
+
+    /// <summary>Opens complete TPS bytes for bounded-memory, synchronous record enumeration.</summary>
+    public static TpsStreamingFile OpenStreaming(byte[] data, TpsOpenOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        options = ValidateOptions(options);
+        ITpsRandomAccessSource? source = null;
+        try
+        {
+            source = TpsRandomAccessSource.OpenBytes(data);
+            var result = TpsStreamingFile.Create(source, options, "byte array", sourcePath: null);
+            source = null;
+            return result;
+        }
+        catch (TpsParseException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw CreateOpenException(InputKind.ByteArray, ex);
+        }
+        finally
+        {
+            source?.Dispose();
+        }
+    }
+
+    /// <summary>Attempts to open a TPS path for bounded-memory record enumeration.</summary>
+    public static bool TryOpenStreaming(
+        string path,
+        out TpsStreamingFile? file,
+        out TpsParseError? error,
+        TpsOpenOptions? options = null) =>
+        TryOpenStreamingCore(() => OpenStreaming(path, options), out file, out error);
+
+    /// <summary>Attempts to open a seekable TPS stream for bounded-memory record enumeration.</summary>
+    public static bool TryOpenStreaming(
+        Stream stream,
+        out TpsStreamingFile? file,
+        out TpsParseError? error,
+        TpsOpenOptions? options = null) =>
+        TryOpenStreamingCore(() => OpenStreaming(stream, options), out file, out error);
+
+    /// <summary>Attempts to open complete TPS bytes for bounded-memory record enumeration.</summary>
+    public static bool TryOpenStreaming(
+        byte[] data,
+        out TpsStreamingFile? file,
+        out TpsParseError? error,
+        TpsOpenOptions? options = null) =>
+        TryOpenStreamingCore(() => OpenStreaming(data, options), out file, out error);
 
     /// <summary>Attempts to open a TPS file path and returns a structured error on failure.</summary>
     public static bool TryOpen(
@@ -286,32 +436,59 @@ public sealed class TpsFile
     }
 
     private static TpsFile Parse(
-        byte[] data,
+        ITpsRandomAccessSource source,
         TpsOpenOptions options,
         InputKind inputKind,
         string? sourcePath,
         bool metadataOnly)
     {
-        var reader = OpenReader(data, options);
-        var contents = reader.Parse(options.IgnoreErrors, metadataOnly);
-        if (contents.TableDefinitions.Count == 0)
+        using var streaming = TpsStreamingFile.Create(
+            source,
+            options,
+            inputKind switch
+            {
+                InputKind.File => "file",
+                InputKind.Stream => "stream",
+                InputKind.ByteArray => "byte array",
+                _ => throw new ArgumentOutOfRangeException(nameof(inputKind))
+            },
+            sourcePath);
+        if (metadataOnly)
         {
-            throw new TpsParseException(new TpsParseError(
-                $"No table definitions were found in the {Describe(inputKind)}.",
-                sourcePath));
+            return new TpsFile(
+                streaming.Tables,
+                isMetadataOnly: true,
+                streaming.IsEncrypted,
+                streaming.RecoveryIssueCount);
         }
 
-        var sourceTableName = contents.TableDefinitions.Count == 1
-            ? GetSourceTableName(sourcePath)
-            : null;
-        var tables = contents.TableDefinitions
-            .Select(table => BuildTable(table.Key, table.Value, contents, options, sourceTableName))
-            .ToArray();
+        var tables = new List<TpsTable>(streaming.Tables.Count);
+        options.Progress?.Report(new TpsReadProgress(
+            TpsReadStage.ScanningRecordsAndMemos,
+            0,
+            Math.Max(1, source.Length)));
+        foreach (var table in streaming.Tables)
+        {
+            var records = streaming.ReadRecords(table).ToArray();
+            tables.Add(new TpsTable(
+                table.TableNumber,
+                table.Name,
+                table.Fields,
+                table.Memos,
+                table.Indexes,
+                records,
+                table.RecordLength));
+        }
+        options.Progress?.Report(new TpsReadProgress(
+            TpsReadStage.ScanningRecordsAndMemos,
+            source.Length,
+            Math.Max(1, source.Length)));
+
         return new TpsFile(
             tables,
-            metadataOnly,
-            reader.IsEncrypted,
-            reader.RecoveryIssueCount);
+            isMetadataOnly: false,
+            streaming.IsEncrypted,
+            streaming.RecoveryIssueCount);
     }
 
     private static TpsParseException CreateOpenException(
@@ -339,38 +516,14 @@ public sealed class TpsFile
         return $"{FormatName} {inputName}";
     }
 
-    private static TpsFileReader OpenReader(byte[] data, TpsOpenOptions options)
-    {
-        if (string.IsNullOrEmpty(options.Owner))
-        {
-            return new TpsFileReader(data, options.StringEncoding, options.Progress);
-        }
-
-        try
-        {
-            var unencryptedFile = new TpsFileReader(data, options.StringEncoding, options.Progress);
-            _ = unencryptedFile.GetHeader();
-            return unencryptedFile;
-        }
-        catch (InvalidDataException)
-        {
-            return new TpsFileReader(
-                data,
-                options.Owner,
-                options.StringEncoding,
-                options.IgnoreErrors,
-                options.Progress);
-        }
-    }
-
-    private static TpsOpenOptions ValidateOptions(TpsOpenOptions? options)
+    internal static TpsOpenOptions ValidateOptions(TpsOpenOptions? options)
     {
         options ??= new TpsOpenOptions();
         ArgumentNullException.ThrowIfNull(options.StringEncoding);
         return options;
     }
 
-    private static TpsTable BuildTable(
+    internal static TpsTable BuildTable(
         int tableNumber,
         TableDefinitionRecord definition,
         ParsedTpsFile contents,
@@ -519,7 +672,7 @@ public sealed class TpsFile
         }
     }
 
-    private static HashSet<string> FindAmbiguousAliases<T>(
+    internal static HashSet<string> FindAmbiguousAliases<T>(
         IEnumerable<T> definitions,
         Func<T, string> getName,
         Func<T, string> getShortName)
@@ -552,7 +705,7 @@ public sealed class TpsFile
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
-    private static void AddAliases<T>(
+    internal static void AddAliases<T>(
         IDictionary<string, T> values,
         string name,
         string shortName,
@@ -593,7 +746,7 @@ public sealed class TpsFile
             : fieldPrefix;
     }
 
-    private static string? GetSourceTableName(string? sourcePath)
+    internal static string? GetSourceTableName(string? sourcePath)
     {
         if (string.IsNullOrWhiteSpace(sourcePath))
         {
@@ -629,5 +782,24 @@ public sealed class TpsFile
             TpsReadStage.LoadingSource,
             length,
             Math.Max(1, length)));
+    }
+
+    private static bool TryOpenStreamingCore(
+        Func<TpsStreamingFile> open,
+        out TpsStreamingFile? file,
+        out TpsParseError? error)
+    {
+        try
+        {
+            file = open();
+            error = null;
+            return true;
+        }
+        catch (TpsParseException ex)
+        {
+            file = null;
+            error = ex.Error;
+            return false;
+        }
     }
 }

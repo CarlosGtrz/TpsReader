@@ -151,6 +151,43 @@ Set `TpsOpenOptions.Progress` to receive byte-based `TpsReadProgress` updates fo
 source loading, decryption, definition scanning, and content scanning. Metadata-
 only opens omit the content stage.
 
+### Bounded-memory streaming
+
+Use `OpenStreaming` when a file is too large to retain all records in memory.
+The returned object owns its path handle and must be disposed. Its tables contain
+schema only; call `ReadRecords` to decode one record at a time in file order:
+
+```csharp
+using var file = TpsFile.OpenStreaming(@"C:\data\CUSTOMER.TPS");
+var table = file.GetTable();
+
+foreach (var record in file.ReadRecords(table))
+{
+    Console.WriteLine(record.GetString("COMPANY"));
+}
+
+long exactCount = file.CountRecords(table); // scans only when not already known
+```
+
+`OpenStreaming` accepts paths, complete byte arrays, and readable seekable
+streams. It does not accept forward-only streams such as the stream returned by
+`ZipArchiveEntry.Open()`: extract or spool one TPS entry to a temporary file,
+open that path, dispose the streaming file, and then delete the temporary file.
+Processing archive entries sequentially keeps both memory and temporary storage
+bounded.
+
+Only one enumeration or count may be active for a `TpsStreamingFile`, although
+sequential repeat scans are supported. Caller-provided streams remain open and
+must not be accessed concurrently. Records already returned are self-contained
+and remain usable after the streaming file is disposed. MEMO/BLOB payloads are
+fully assembled for the current record; peak memory can therefore include the
+largest current payload plus a lightweight fragment-location index.
+
+Pass a `CancellationToken` to `ReadRecords` or `CountRecords` for cooperative
+cancellation. Streaming progress uses `IndexingMemos`, `StreamingRecords`, and
+`CountingRecords` stages. Errors found after enumeration begins are reported as
+`TpsParseException`.
+
 Schema objects preserve raw TPS details in addition to their existing logical
 properties. Tables expose `RecordLength`; fields expose raw type, flags, index,
 and string-mask metadata; MEMO/BLOB definitions expose declared length and

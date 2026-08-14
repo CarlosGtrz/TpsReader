@@ -10,12 +10,19 @@ public sealed class TpsRecord
         new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private static readonly IReadOnlyDictionary<string, TpsFieldType> EmptyFieldTypes =
         new Dictionary<string, TpsFieldType>(StringComparer.OrdinalIgnoreCase);
+    private static readonly IReadOnlyDictionary<string, object?> EmptyValues =
+        new Dictionary<string, object?>();
+    private static readonly IReadOnlyDictionary<string, TpsMemoValue> EmptyMemos =
+        new Dictionary<string, TpsMemoValue>();
 
     private readonly IReadOnlyDictionary<string, object?> _valuesByName;
     private readonly IReadOnlyDictionary<string, TpsMemoValue> _memosByName;
     private readonly IReadOnlySet<string> _ambiguousFieldAliases;
     private readonly IReadOnlySet<string> _ambiguousMemoAliases;
     private readonly IReadOnlyDictionary<string, TpsFieldType> _fieldTypesByName;
+    private readonly TpsRecordLayout? _layout;
+    private readonly object?[]? _values;
+    private readonly TpsMemoValue[]? _memos;
 
     internal TpsRecord(
         int recordNumber,
@@ -32,6 +39,33 @@ public sealed class TpsRecord
         _ambiguousFieldAliases = ambiguousFieldAliases ?? EmptyAliases;
         _ambiguousMemoAliases = ambiguousMemoAliases ?? EmptyAliases;
         _fieldTypesByName = fieldTypesByName ?? EmptyFieldTypes;
+        SourcePageOffset = sourcePageOffset;
+    }
+
+    internal TpsRecord(
+        int recordNumber,
+        object?[] values,
+        TpsMemoValue[] memos,
+        TpsRecordLayout layout,
+        int sourcePageOffset = 0)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        ArgumentNullException.ThrowIfNull(memos);
+        ArgumentNullException.ThrowIfNull(layout);
+        if (values.Length != layout.FieldCount || memos.Length != layout.MemoCount)
+        {
+            throw new ArgumentException("TPS record values do not match their shared table layout.");
+        }
+
+        RecordNumber = recordNumber;
+        _values = values;
+        _memos = memos;
+        _layout = layout;
+        _valuesByName = EmptyValues;
+        _memosByName = EmptyMemos;
+        _ambiguousFieldAliases = EmptyAliases;
+        _ambiguousMemoAliases = EmptyAliases;
+        _fieldTypesByName = EmptyFieldTypes;
         SourcePageOffset = sourcePageOffset;
     }
 
@@ -240,6 +274,40 @@ public sealed class TpsRecord
 
     private ResolvedValue ResolveValue(string name)
     {
+        if (_layout is not null)
+        {
+            var layoutHasField = _layout.TryGetField(name, out var fieldIndex);
+            var layoutHasMemo = _layout.TryGetMemo(name, out var memoIndex);
+            if (layoutHasField && layoutHasMemo)
+            {
+                throw new TpsParseException(new TpsParseError(
+                    $"Name '{name}' is ambiguous between a field and a MEMO/BLOB; use a table-qualified name."));
+            }
+
+            if (_layout.IsAmbiguous(name))
+            {
+                throw new TpsParseException(new TpsParseError(
+                    $"Name '{name}' is ambiguous; use its full table-qualified name."));
+            }
+
+            if (layoutHasField)
+            {
+                var fieldType = _layout.GetFieldType(fieldIndex);
+                return new ResolvedValue(
+                    _values![fieldIndex],
+                    fieldType == TpsFieldType.Unknown ? null : fieldType);
+            }
+
+            if (layoutHasMemo)
+            {
+                var memo = _memos![memoIndex];
+                return new ResolvedValue(memo, memo.Definition.Type);
+            }
+
+            throw new TpsParseException(new TpsParseError(
+                $"Field, MEMO, or BLOB '{name}' was not found in record {RecordNumber}."));
+        }
+
         var hasField = _valuesByName.TryGetValue(name, out var fieldValue);
         var hasMemo = _memosByName.TryGetValue(name, out var memoValue);
         if (hasField && hasMemo)
@@ -272,6 +340,23 @@ public sealed class TpsRecord
     private TpsMemoValue GetMemoValue(string name)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        if (_layout is not null)
+        {
+            if (_layout.TryGetMemo(name, out var memoIndex))
+            {
+                return _memos![memoIndex];
+            }
+
+            if (_layout.IsMemoAmbiguous(name))
+            {
+                throw new TpsParseException(new TpsParseError(
+                    $"MEMO/BLOB name '{name}' is ambiguous; use its full table-qualified name."));
+            }
+
+            throw new TpsParseException(new TpsParseError(
+                $"Memo/BLOB '{name}' was not found in record {RecordNumber}."));
+        }
+
         if (_memosByName.TryGetValue(name, out var value))
         {
             return value;
@@ -537,6 +622,60 @@ public sealed class TpsRecord
     }
 
     private sealed record ResolvedValue(object? Value, TpsFieldType? FieldType);
+}
+
+internal sealed class TpsRecordLayout
+{
+    private readonly Dictionary<string, int> _fields = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _memos = new(StringComparer.OrdinalIgnoreCase);
+    private readonly IReadOnlySet<string> _ambiguousFields;
+    private readonly IReadOnlySet<string> _ambiguousMemos;
+    private readonly TpsFieldType[] _fieldTypes;
+
+    public TpsRecordLayout(IReadOnlyList<TpsField> fields, IReadOnlyList<TpsMemo> memos)
+    {
+        _ambiguousFields = TpsFile.FindAmbiguousAliases(fields, field => field.Name, field => field.ShortName);
+        _ambiguousMemos = TpsFile.FindAmbiguousAliases(memos, memo => memo.Name, memo => memo.ShortName);
+        _fieldTypes = new TpsFieldType[fields.Count];
+        for (var i = 0; i < fields.Count; i++)
+        {
+            var field = fields[i];
+            _fieldTypes[i] = field.Type;
+            AddNames(_fields, field.Name, field.ShortName, i, _ambiguousFields);
+        }
+
+        for (var i = 0; i < memos.Count; i++)
+        {
+            var memo = memos[i];
+            AddNames(_memos, memo.Name, memo.ShortName, i, _ambiguousMemos);
+        }
+
+        FieldCount = fields.Count;
+        MemoCount = memos.Count;
+    }
+
+    public int FieldCount { get; }
+    public int MemoCount { get; }
+
+    public bool TryGetField(string name, out int index) => _fields.TryGetValue(name, out index);
+    public bool TryGetMemo(string name, out int index) => _memos.TryGetValue(name, out index);
+    public bool IsAmbiguous(string name) => _ambiguousFields.Contains(name) || _ambiguousMemos.Contains(name);
+    public bool IsMemoAmbiguous(string name) => _ambiguousMemos.Contains(name);
+    public TpsFieldType GetFieldType(int index) => _fieldTypes[index];
+
+    private static void AddNames(
+        IDictionary<string, int> names,
+        string fullName,
+        string shortName,
+        int index,
+        IReadOnlySet<string> ambiguousAliases)
+    {
+        names.Add(fullName, index);
+        if (!string.IsNullOrWhiteSpace(shortName) && !ambiguousAliases.Contains(shortName))
+        {
+            names.TryAdd(shortName, index);
+        }
+    }
 }
 
 internal sealed class TpsMemoValue

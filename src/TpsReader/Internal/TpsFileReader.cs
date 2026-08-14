@@ -4,10 +4,28 @@ namespace TpsReader.Internal;
 
 internal sealed class TpsFileReader
 {
-    private readonly TpsBinaryReader _reader;
+    private readonly TpsRandomAccessReader _reader;
     private readonly Encoding _textEncoding;
     private readonly IProgress<TpsReadProgress>? _progress;
     private readonly Dictionary<TpsReadStage, long> _reportedProgress = [];
+
+    public TpsFileReader(
+        ITpsRandomAccessSource source,
+        string? owner,
+        Encoding textEncoding,
+        IProgress<TpsReadProgress>? progress = null)
+    {
+        _textEncoding = textEncoding;
+        _progress = progress;
+        _reader = new TpsRandomAccessReader(source, owner);
+        if (_reader.IsEncrypted)
+        {
+            ReportProgress(
+                TpsReadStage.DecryptingSource,
+                Math.Min(0x200, _reader.Length),
+                _reader.Length);
+        }
+    }
 
     public TpsFileReader(
         byte[] data,
@@ -15,73 +33,39 @@ internal sealed class TpsFileReader
         Encoding textEncoding,
         bool ignoreErrors,
         IProgress<TpsReadProgress>? progress = null)
+        : this(TpsRandomAccessSource.OpenBytes(data), owner, textEncoding, progress)
     {
-        _progress = progress;
-        var key = new TpsEncryptionKey(owner);
-        if (data.Length < 0x200)
-        {
-            throw new InvalidDataException("Encrypted TPS file is smaller than its header.");
-        }
-
-        key.Decrypt(data, 0, 0x200);
-        ReportProgress(TpsReadStage.DecryptingSource, 0x200, data.Length);
-        _reader = new TpsBinaryReader(data);
-        _textEncoding = textEncoding;
-        IsEncrypted = true;
-        var header = GetHeader();
-        for (var i = 0; i < header.PageStarts.Count; i++)
-        {
-            var start = header.PageStarts[i];
-            var end = header.PageEnds[i];
-            if (IsEmptyBlock(start, end) || start >= _reader.Length)
-            {
-                continue;
-            }
-
-            try
-            {
-                ValidateBlockRange(start, end);
-                key.Decrypt(data, start, end - start);
-                ReportProgress(TpsReadStage.DecryptingSource, end, data.Length);
-            }
-            catch (InvalidDataException) when (ignoreErrors)
-            {
-                RecoveryIssueCount++;
-            }
-        }
-
-        ReportProgress(TpsReadStage.DecryptingSource, data.Length, data.Length);
+        _ = ignoreErrors;
     }
 
     public TpsFileReader(
         byte[] data,
         Encoding textEncoding,
         IProgress<TpsReadProgress>? progress = null)
+        : this(TpsRandomAccessSource.OpenBytes(data), null, textEncoding, progress)
     {
-        _reader = new TpsBinaryReader(data);
-        _textEncoding = textEncoding;
-        _progress = progress;
     }
 
-    public bool IsEncrypted { get; }
+    public bool IsEncrypted => _reader.IsEncrypted;
     public int RecoveryIssueCount { get; private set; }
+    public int Length => _reader.Length;
 
-    public TpsHeader GetHeader()
-    {
-        _reader.Seek(0);
-        return new TpsHeader(_reader);
-    }
+    public TpsHeader GetHeader() => _reader.Header;
 
     public ParsedTpsFile Parse(bool ignoreErrors, bool metadataOnly = false)
     {
-        var (definitions, names) = ReadMetadata(ignoreErrors);
+        var metadata = ReadMetadata(ignoreErrors);
         var (dataRecords, memoRecords) = metadataOnly
-            ? CreateEmptyContent(definitions)
-            : ReadContent(definitions, ignoreErrors);
-        return new ParsedTpsFile(definitions, names, dataRecords, memoRecords);
+            ? CreateEmptyContent(metadata.Definitions)
+            : ReadContent(metadata.Definitions, ignoreErrors);
+        return new ParsedTpsFile(
+            metadata.Definitions,
+            metadata.Names,
+            dataRecords,
+            memoRecords);
     }
 
-    private (SortedDictionary<int, TableDefinitionRecord> Definitions, Dictionary<int, string> Names) ReadMetadata(bool ignoreErrors)
+    internal ParsedTpsMetadata ReadMetadata(bool ignoreErrors)
     {
         var fragments = new SortedDictionary<int, List<RawTpsRecord?>>();
         var tableNames = new Dictionary<int, string>();
@@ -92,7 +76,7 @@ internal sealed class TpsFileReader
             var pageNames = new List<TableNameRecord>();
             try
             {
-                foreach (var record in page)
+                foreach (var record in page.Records)
                 {
                     switch (record.Header)
                     {
@@ -140,7 +124,159 @@ internal sealed class TpsFileReader
             }
         }
 
-        return (definitions, tableNames);
+        return new ParsedTpsMetadata(definitions, tableNames);
+    }
+
+    internal IEnumerable<DataRecord> ReadDataRecords(
+        int tableNumber,
+        TableDefinitionRecord definition,
+        bool ignoreErrors,
+        TpsReadStage stage,
+        CancellationToken cancellationToken = default)
+    {
+        foreach (var page in ReadRecordPages(ignoreErrors, stage, cancellationToken))
+        {
+            var pageRecords = new List<DataRecord>();
+            try
+            {
+                foreach (var record in page.Records)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (record.Header is DataHeader header && header.TableNumber == tableNumber)
+                    {
+                        pageRecords.Add(new DataRecord(record, definition));
+                    }
+                }
+            }
+            catch (InvalidDataException) when (ignoreErrors)
+            {
+                RecoveryIssueCount++;
+                continue;
+            }
+
+            foreach (var record in pageRecords)
+            {
+                yield return record;
+            }
+        }
+    }
+
+    internal long CountDataRecords(
+        int tableNumber,
+        bool ignoreErrors,
+        CancellationToken cancellationToken = default)
+    {
+        long count = 0;
+        foreach (var page in ReadRecordPages(ignoreErrors, TpsReadStage.CountingRecords, cancellationToken))
+        {
+            foreach (var record in page.Records)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (record.Header is DataHeader header && header.TableNumber == tableNumber)
+                {
+                    count++;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    internal MemoLocationIndex BuildMemoIndex(
+        int tableNumber,
+        bool ignoreErrors,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new MemoLocationIndex();
+        foreach (var page in ReadRecordPages(ignoreErrors, TpsReadStage.IndexingMemos, cancellationToken))
+        {
+            for (var ordinal = 0; ordinal < page.Records.Count; ordinal++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (page.Records[ordinal].Header is not MemoHeader header || header.TableNumber != tableNumber)
+                {
+                    continue;
+                }
+
+                result.Add(
+                    header.MemoIndex,
+                    header.OwnerRecordNumber,
+                    header.SequenceNumber,
+                    new MemoFragmentLocation(page.Page.SourceOffset, page.Page.PageSize, ordinal));
+            }
+        }
+
+        return result;
+    }
+
+    internal MemoRecord? ReadMemo(
+        MemoLocationIndex index,
+        int memoIndex,
+        int ownerRecordNumber,
+        bool ignoreErrors,
+        CancellationToken cancellationToken = default)
+    {
+        if (!index.TryGet(memoIndex, ownerRecordNumber, out var locations))
+        {
+            return null;
+        }
+
+        var isComplete = IsComplete(locations);
+        if (!isComplete && !ignoreErrors)
+        {
+            throw new InvalidDataException(
+                $"TPS MEMO/BLOB fragments are incomplete for memo {memoIndex}, record {ownerRecordNumber}.");
+        }
+
+        var pageCache = new Dictionary<int, IReadOnlyList<RawTpsRecord>>();
+        var fragments = new List<byte[]>();
+        MemoHeader? firstHeader = null;
+        var totalLength = 0;
+        foreach (var location in locations)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (location is null)
+            {
+                continue;
+            }
+
+            if (!pageCache.TryGetValue(location.PageOffset, out var records))
+            {
+                var page = ReadPageAt(location.PageOffset, location.PageSize);
+                records = page.ReadRecords(_textEncoding);
+                pageCache[location.PageOffset] = records;
+            }
+
+            if ((uint)location.RecordOrdinal >= (uint)records.Count ||
+                records[location.RecordOrdinal].Header is not MemoHeader header)
+            {
+                throw new InvalidDataException(
+                    $"TPS MEMO/BLOB fragment at page {location.PageOffset} could not be located.");
+            }
+
+            firstHeader ??= header;
+            var bytes = records[location.RecordOrdinal].Data.RemainingBytes();
+            totalLength = checked(totalLength + bytes.Length);
+            fragments.Add(bytes);
+        }
+
+        if (firstHeader is null)
+        {
+            return null;
+        }
+
+        var merged = new byte[totalLength];
+        var destination = 0;
+        foreach (var fragment in fragments)
+        {
+            fragment.CopyTo(merged, destination);
+            destination += fragment.Length;
+        }
+
+        return new MemoRecord(
+            firstHeader,
+            new TpsBinaryReader(merged),
+            isComplete ? TpsMemoState.Complete : TpsMemoState.Damaged);
     }
 
     private (
@@ -157,7 +293,7 @@ internal sealed class TpsFileReader
             var pageMemos = new List<(MemoHeader Header, RawTpsRecord Record)>();
             try
             {
-                foreach (var record in page)
+                foreach (var record in page.Records)
                 {
                     switch (record.Header)
                     {
@@ -229,27 +365,27 @@ internal sealed class TpsFileReader
             memosByDefinition.ToDictionary(pair => pair.Key, pair => (IReadOnlyDictionary<int, MemoRecord>)pair.Value));
     }
 
-    private IEnumerable<IReadOnlyList<RawTpsRecord>> ReadRecordPages(
+    private IEnumerable<DecodedPage> ReadRecordPages(
         bool ignoreErrors,
-        TpsReadStage stage)
+        TpsReadStage stage,
+        CancellationToken cancellationToken = default)
     {
+        ResetProgress(stage);
         ReportProgress(stage, 0, _reader.Length);
-        foreach (var block in ReadBlocks(ignoreErrors))
+        foreach (var page in ReadPages(ignoreErrors, cancellationToken))
         {
-            foreach (var page in block.Pages)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryReadPage(
+                page,
+                _textEncoding,
+                ignoreErrors,
+                out var records,
+                ReportRecoveryIssue))
             {
-                if (TryReadPage(
-                    page,
-                    _textEncoding,
-                    ignoreErrors,
-                    out var records,
-                    ReportRecoveryIssue))
-                {
-                    yield return records;
-                }
-
-                ReportProgress(stage, page.EndOffset, _reader.Length);
+                yield return new DecodedPage(page, records);
             }
+
+            ReportProgress(stage, page.EndOffset, _reader.Length);
         }
 
         ReportProgress(stage, _reader.Length, _reader.Length);
@@ -275,11 +411,12 @@ internal sealed class TpsFileReader
         }
     }
 
-    private IEnumerable<TpsBlock> ReadBlocks(bool ignoreErrors)
+    private IEnumerable<TpsPage> ReadPages(bool ignoreErrors, CancellationToken cancellationToken)
     {
         var header = GetHeader();
         for (var i = 0; i < header.PageStarts.Count; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var start = header.PageStarts[i];
             var end = header.PageEnds[i];
             if (IsEmptyBlock(start, end) || start >= _reader.Length)
@@ -287,11 +424,9 @@ internal sealed class TpsFileReader
                 continue;
             }
 
-            TpsBlock block;
             try
             {
                 ValidateBlockRange(start, end);
-                block = new TpsBlock(_reader, start, end, ignoreErrors, ReportRecoveryIssue);
             }
             catch (InvalidDataException) when (ignoreErrors)
             {
@@ -299,8 +434,107 @@ internal sealed class TpsFileReader
                 continue;
             }
 
-            yield return block;
+            var position = start;
+            while (position < end)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                TpsPage? decodedPage = null;
+                try
+                {
+                    var pageSize = GetCompletePageSize(position, end);
+                    if (pageSize is not null)
+                    {
+                        decodedPage = ReadPageAt(position, pageSize.Value);
+                        position = decodedPage.EndOffset;
+                    }
+                    else
+                    {
+                        position = AdvanceOneSector(position, end);
+                    }
+                }
+                catch (InvalidDataException) when (ignoreErrors)
+                {
+                    RecoveryIssueCount++;
+                    position = AdvanceOneSector(position, end);
+                }
+
+                if (decodedPage is not null)
+                {
+                    yield return decodedPage;
+                }
+
+                position = NavigateToNextPage(position, end);
+            }
         }
+    }
+
+    private int? GetCompletePageSize(int pageStart, int blockEnd)
+    {
+        var prefix = _reader.ReadBytes(pageStart, 6);
+        var prefixReader = new TpsBinaryReader(prefix);
+        _ = prefixReader.ReadInt32LittleEndian();
+        var pageSize = prefixReader.ReadUInt16LittleEndian();
+        if (pageSize < 13 || pageStart + pageSize > blockEnd)
+        {
+            throw new InvalidDataException($"Invalid TPS page size {pageSize} at offset {pageStart}.");
+        }
+
+        for (var offset = 0x100; offset < pageSize; offset += 0x100)
+        {
+            if (offset > blockEnd - pageStart - 4)
+            {
+                return null;
+            }
+
+            var sectorPosition = pageStart + offset;
+            var sector = _reader.ReadBytes(sectorPosition, Math.Min(6, blockEnd - sectorPosition));
+            var sectorReader = new TpsBinaryReader(sector);
+            if (sectorReader.ReadInt32LittleEndian() == sectorPosition && sector.Length >= 6)
+            {
+                var nestedPageSize = sectorReader.ReadUInt16LittleEndian();
+                if (nestedPageSize >= 13 &&
+                    nestedPageSize <= blockEnd - sectorPosition &&
+                    nestedPageSize <= _reader.Length - sectorPosition)
+                {
+                    return null;
+                }
+            }
+        }
+
+        return pageSize;
+    }
+
+    private TpsPage ReadPageAt(int pageOffset, int pageSize)
+    {
+        var bytes = _reader.ReadBytes(pageOffset, pageSize);
+        return new TpsPage(new TpsBinaryReader(bytes), pageOffset);
+    }
+
+    private int NavigateToNextPage(int position, int end)
+    {
+        if ((position & 0xFF) != 0)
+        {
+            position = Math.Min(end, (position & ~0xFF) + 0x100);
+        }
+
+        while (position < end && end - position >= 4)
+        {
+            var address = new TpsBinaryReader(_reader.ReadBytes(position, 4)).ReadInt32LittleEndian();
+            if (address == position)
+            {
+                break;
+            }
+
+            position = Math.Min(end, position + 0x100);
+        }
+
+        return position;
+    }
+
+    private static int AdvanceOneSector(int position, int end)
+    {
+        var next = Math.Min(end, (position & ~0xFF) + 0x100);
+        return next <= position ? Math.Min(end, position + 0x100) : next;
     }
 
     private void ValidateBlockRange(int start, int end)
@@ -330,7 +564,8 @@ internal sealed class TpsFileReader
         sequence[sequenceNumber] = record;
     }
 
-    private static bool IsComplete(IEnumerable<RawTpsRecord?> records) => records.All(record => record is not null);
+    private static bool IsComplete<T>(IEnumerable<T?> records) where T : class =>
+        records.All(record => record is not null);
 
     private static TpsBinaryReader Merge(IEnumerable<RawTpsRecord?> records)
     {
@@ -360,14 +595,14 @@ internal sealed class TpsFileReader
     private static (
         Dictionary<int, IReadOnlyList<DataRecord>> DataRecords,
         Dictionary<(int TableNumber, int MemoIndex), IReadOnlyDictionary<int, MemoRecord>> MemoRecords)
-        CreateEmptyContent(IReadOnlyDictionary<int, TableDefinitionRecord> definitions)
-    {
-        return (
+        CreateEmptyContent(IReadOnlyDictionary<int, TableDefinitionRecord> definitions) =>
+        (
             definitions.Keys.ToDictionary(key => key, _ => (IReadOnlyList<DataRecord>)Array.Empty<DataRecord>()),
             []);
-    }
 
     private void ReportRecoveryIssue() => RecoveryIssueCount++;
+
+    private void ResetProgress(TpsReadStage stage) => _reportedProgress.Remove(stage);
 
     private void ReportProgress(TpsReadStage stage, long completed, long total)
     {
@@ -392,7 +627,6 @@ internal sealed class TpsFileReader
             FileMode.Open,
             FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete);
-
         return ReadAllBytes(stream);
     }
 
@@ -432,7 +666,51 @@ internal sealed class TpsFileReader
 
     private static NotSupportedException InputTooLarge() =>
         new($"TPS inputs larger than {int.MaxValue} bytes are not supported.");
+
+    private sealed record DecodedPage(TpsPage Page, IReadOnlyList<RawTpsRecord> Records);
 }
+
+internal sealed class MemoLocationIndex
+{
+    private readonly Dictionary<(int MemoIndex, int OwnerRecord), List<MemoFragmentLocation?>> _locations = [];
+
+    public void Add(int memoIndex, int ownerRecord, int sequenceNumber, MemoFragmentLocation location)
+    {
+        var key = (memoIndex, ownerRecord);
+        if (!_locations.TryGetValue(key, out var sequence))
+        {
+            _locations[key] = sequence = [];
+        }
+
+        while (sequence.Count <= sequenceNumber)
+        {
+            sequence.Add(null);
+        }
+
+        sequence[sequenceNumber] = location;
+    }
+
+    public bool TryGet(
+        int memoIndex,
+        int ownerRecord,
+        out IReadOnlyList<MemoFragmentLocation?> locations)
+    {
+        if (_locations.TryGetValue((memoIndex, ownerRecord), out var found))
+        {
+            locations = found;
+            return true;
+        }
+
+        locations = [];
+        return false;
+    }
+}
+
+internal sealed record MemoFragmentLocation(int PageOffset, int PageSize, int RecordOrdinal);
+
+internal sealed record ParsedTpsMetadata(
+    IReadOnlyDictionary<int, TableDefinitionRecord> Definitions,
+    IReadOnlyDictionary<int, string> Names);
 
 internal sealed record ParsedTpsFile(
     IReadOnlyDictionary<int, TableDefinitionRecord> TableDefinitions,
