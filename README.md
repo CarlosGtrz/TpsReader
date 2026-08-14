@@ -12,7 +12,7 @@ namespace or shim package is provided.
 ## Library usage
 
 ```powershell
-dotnet add package TpsReader --version 0.3.6
+dotnet add package TpsReader --version 0.4.0
 ```
 
 ### Basic usage
@@ -218,7 +218,7 @@ complete, and damaged MEMO/BLOB values recovered with `IgnoreErrors`.
 Install the tool package while keeping the short `tps` command:
 
 ```powershell
-dotnet tool install --global TpsReader.Tool --version 0.3.6
+dotnet tool install --global TpsReader.Tool --version 0.4.0
 tps --help
 ```
 

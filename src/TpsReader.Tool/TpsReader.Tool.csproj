@@ -11,7 +11,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>tps</ToolCommandName>
     <PackageId>TpsReader.Tool</PackageId>
-    <Version>0.3.6</Version>
+    <Version>0.4.0</Version>
     <Authors>CarlosGtrz</Authors>
     <Description>Read-only command-line inspection and export for Clarion TopSpeed TPS files.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
