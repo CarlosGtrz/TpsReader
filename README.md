@@ -335,7 +335,7 @@ claude plugin install tpsreader@tpsreader
 ```
 
 ```text
-pi install npm:@carlosgtrz/tpsreader-agent-skill@1.0.2
+pi install npm:@carlosgtrz/tpsreader-agent-skill@1.0.3
 ```
 
 See the [agent-skill package documentation](plugins/tpsreader/README.md) for

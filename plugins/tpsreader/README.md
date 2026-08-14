@@ -37,7 +37,7 @@ Invoke the skill as `/tpsreader:read-tps-files`.
 ### Pi
 
 ```text
-pi install npm:@carlosgtrz/tpsreader-agent-skill@1.0.2
+pi install npm:@carlosgtrz/tpsreader-agent-skill@1.0.3
 ```
 
 Invoke the skill as `/skill:read-tps-files`, or let Pi select it from the task.
@@ -58,7 +58,7 @@ Export the CUSTOMER table from CUSTOMER.TPS to C:\exports.
 
 The skill discovers schema before reading rows, uses explicit limits, keeps owner keys out of command arguments, and requests confirmation before potentially overwriting export files.
 
-The skill requires TpsReader CLI 0.3.6 or later. It verifies `tps --version`
+The skill requires TpsReader CLI 0.4.0 or later. It verifies `tps --version`
 and command compatibility before use. Missing or incompatible tools are never
 installed or updated without confirmation.
 
